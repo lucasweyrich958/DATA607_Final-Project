@@ -1,0 +1,37 @@
+Group,Home,Away,Date
+A,Germany,Scotland,06/14/2024
+A,Hungary,Switzerland,06/15/2024
+B,Spain,Croatia,06/15/2024
+B,Italy,Albania,06/15/2024
+D,Poland,Netherlands,06/16/2024
+C,Slovenia,Denmark,06/16/2024
+C,Serbia,England,06/16/2024
+E,Romania,Ukraine,06/17/2024
+E,Belgium,Slovakia,06/17/2024
+D,Austria,France,06/17/2024
+F,Turkey,Georgia,06/18/2024
+F,Portugal,Czech Republic,06/18/2024
+B,Croatia,Albania,06/19/2024
+A,Germany,Hungary,06/19/2024
+A,Scotland,Switzerland,06/19/2024
+C,Slovenia,Serbia,06/20/2024
+C,Denmark,England,06/20/2024
+B,Spain,Italy,06/20/2024
+E,Slovakia,Ukraine,06/21/2024
+D,Poland,Austria,06/21/2024
+D,Netherlands,France,06/21/2024
+F,Georgia,Czech Republic,06/22/2024
+F,Turkey,Portugal,06/22/2024
+E,Belgium,Romania,06/22/2024
+A,Switzerland,Germany,06/23/2024
+A,Scotland,Hungary,06/23/2024
+B,Croatia,Italy,06/24/2024
+B,Albania,Spain,06/24/2024
+D,Netherlands,Austria,06/25/2024
+D,France,Poland,06/25/2024
+C,England,Slovenia,06/25/2024
+C,Denmark,Serbia,06/25/2024
+E,Slovakia,Romania,06/26/2024
+E,Ukraine,Belgium,06/26/2024
+F,Czech Republic,Turkey,06/26/2024
+F,Georgia,Portugal,06/26/2024
