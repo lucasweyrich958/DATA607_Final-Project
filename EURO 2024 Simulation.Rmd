@@ -1,0 +1,888 @@
+---
+title: "EURO2024 Simulation"
+author: "Lucas Weyrich"
+date: "2024-04-24"
+output:
+  html_document: default
+  pdf_document: default
+---
+## Introduction
+With the UEFA European football championship (EURO 2024) standing just around the corner from June 14th to July 14th in Germany, many avid football fans are curious who is going to take the title this year. The European football championship rotates bi-annually with the FIFA World Cup. While the regular season for club football is for approximately 10 months of the year, both international tournaments are a phenomenon on their own, eliciting extra special emotions of pride in football fans. 
+The most appealing factor about the international tournaments, opposed to club football, is that citizenship is assigned by birth. Although there are many exceptions to this rule these days, generally, an international team cannot buy players as in club football. This means that a coach has to work with what they got. Additionally, many of these players are opponents for most of their season, when suddenly the cards are radically shuffled for about two months including preparation. These factors make predicting a winner in these international tournaments extra difficult. A team can have 11 world-class players, most playing for teams that are part of the UEFA Champions League (European club tournament for the best teams from each league), yet still get knocked out in the group phase of the World Cup or EURO. The prime example is the 2014 world champion, Germany, in the 2018 and 2022 world cups. While on paper Germany should have reached the quarterfinal, at minimum, they embarassingly did not reach the knock-out phase in neither tournament. 
+Therefore, predicting a winner for the EURO 2024 is additionally difficult, but also adds an additional challenge at the same time. The current project aims to utilize historical team-level, as well as player-level data to train a tree-based regression model, to subsequently predict the wins of each participating team, and simulate the EURO 2024 tournament. The code below shows, annotated, the data acquisition, preparation, modeling, and simulation. As a comparative baseline model, the same simulation was conducted with the FIFA rank as dependent variable at the very bottom.
+
+## Data Acquisition
+The data for this project was acquired using an API (see here: https://www.api-football.com). Because there is a pull-limit for this API, the code shown below for the actual scraping process is non-functional, as the authorization key is removed. Instead, the scraped data is imported from GitHub in form of a csv file. Additionally, two manual data frames are imported: leagues and nations. These include a list of leagues to be scraped from the API, such as recent EUROs, world cups, nation leagues, and others. The nations data frame lists the participating teams, as well as the groups and the ID on the API. Lastly, all packages required for this project are loaded at the very top.
+```{r}
+#Load packages
+library(httr)
+library(jsonlite)
+library(dplyr)
+library(tidyr)
+library(caret)
+library(randomForest)
+library(randomForestExplainer)
+library(Metrics)
+library(gt)
+library(gtExtras)
+library(lubridate)
+library(shapviz)
+library(kernelshap)
+#Import nations and leagues information for API scrape
+leagues = read.csv("https://raw.githubusercontent.com/lucasweyrich958/EURO2024_Simulation/main/Leagues.csv")
+nations = read.csv("https://raw.githubusercontent.com/lucasweyrich958/EURO2024_Simulation/main/Nations.csv")
+head(leagues)
+head(nations)
+```
+The chunk below shows the code and functions utilized to scrape the API. Again, the code scrape code is non-functional due to the cost associated with the API.
+```{r, eval=FALSE}
+scrape_data = function(league_id, season, team_id) {
+  url = "https://api-football-v1.p.rapidapi.com/v3/teams/statistics" #Identify API URL
+
+  queryString = list(
+    league = league_id,
+    season = season,
+    team = team_id) #Create a quuery string to be used in for loop
+
+  response = VERB("GET", url, query = queryString, add_headers('X-RapidAPI-Key' = 'xxx',
+                                                                'X-RapidAPI-Host' = 'api-football-v1.p.rapidapi.com'),
+                   content_type("application/octet-stream")) #Request API pull
+
+  output = fromJSON(rawToChar(response$content))
+  output = output$response #Save out response
+  data = NULL #Reset data frame
+
+  if (!is.null(output$team) && !is.null(output$form) && !is.null(output$fixtures) &&
+      !is.null(output$goals$`for`$total) && !is.null(output$goals$against$total)) {
+    data = as.data.frame(output$team)
+    data = cbind(data, as.data.frame(output$form))
+    data = cbind(data, as.data.frame(output$league$season))
+    data = cbind(data, as.data.frame(output$fixtures))
+    data = cbind(data, as.data.frame(output$goals$`for`$total))
+    data = cbind(data, as.data.frame(output$goals$against$total))} #Take out all the necessary data of the nested lists
+  return(data)}
+
+team_data_scrape = data.frame()
+
+#For-loop to scrape all teams and all leagues and seasons from the dataframe, and save it into a new dataframe
+for (i in 1:nrow(leagues)) {
+  league_id = leagues$ID[i]
+  season = leagues$Season[i]
+
+  for (j in 1:nrow(nations)) {
+    team_id = nations$ID[j]
+    team_data = scrape_data(league_id, season, team_id)
+    all_data = rbind(all_data, team_data)}}
+```
+```{r}
+team_data_scrape = read.csv("https://raw.githubusercontent.com/lucasweyrich958/EURO2024_Simulation/main/Team_scrape.csv") 
+head(team_data_scrape)
+```
+
+The function above takes in the variables league_id, season, and team_id, and subsequently requests to the API the team data from that specific tournament in that season. The function then selects the relevant columns from the response, such as wins, losses, goals scored, goals conceded, etc. The for-loop loops though the leagues and nations data frames to request the API for every team and every tournament and season. It is important to note that not every team will receive a response, because some teams may not have qualified for a specific tournament in some year. This data frame was then used to retrieve the roster for the player IDs for the respective team, season, and league from the API. Once the player IDs were retrieved, another function retrieved the player-level statistics for the whole season (e.g., club included). Like above, the authorization key is masked.
+
+```{r, eval=FALSE}
+scrape_player_ids = function(league_id, season) {
+    url <- "https://api-football-v1.p.rapidapi.com/v3/players?league=" # Identify API URL
+    
+    league = league_id
+    season = season
+    page = 1
+    
+    all_data = data.frame()
+    repeat {
+      query_string = paste(url, league, '&season=', season, '&page=', page, sep = '')
+      
+      response = VERB("GET", query_string, add_headers('X-RapidAPI-Key' = 'xxxx',
+                                                        'X-RapidAPI-Host' = 'api-football-v1.p.rapidapi.com'),
+                       content_type("application/octet-stream")) # Request API pull
+      Sys.sleep(3)
+      output = fromJSON(rawToChar(response$content))
+      total_pages = output$paging$total
+      current_page = output$paging$current
+      output = output$response # Save response
+      output = unnest(output, cols = statistics)
+      
+      
+      data = as.data.frame(output$player$id)
+      data = cbind(data, as.data.frame(output$team$id))
+      data = cbind(data, as.data.frame(output$league$season))
+      all_data = rbind(all_data, data)
+      if (current_page >= total_pages) {
+        break # Exit loop if current page is greater than or equal to total pages
+      }
+      
+      page = page + 1 # Increment page number for next iteration
+    }
+    
+    return(all_data)
+  }
+
+player_id_data = data.frame()
+
+for (i in 1:nrow(leagues)) {
+  league_id = leagues$ID[i]
+  season = leagues$Season[i]
+  team_data = scrape_player_ids(league_id, season)
+  player_id_data = rbind(player_id_data, team_data)} #Pull players for each tournament and season necessary
+
+colnames(player_id_data) = c('Player_ID', 'Team_ID', 'Season')
+team_ids = as.data.frame(nations$ID)
+
+player_ids_EUR = merge(x = player_id_data, y = nations, by.x = 'Team_ID', by.y = 'ID') #Join player ID data with nations ID, to only retain relevant player IDs
+
+all_data = data.frame()
+
+scrape_player_stats = function(player_id, season) {
+    url = "https://api-football-v1.p.rapidapi.com/v3/players?id=" # Identify API URL
+    
+    player = player_id
+    season = season
+
+    query_string = paste(url, player, '&season=', season, sep = '')
+    
+    response = VERB("GET", query_string, add_headers('X-RapidAPI-Key' = 'xxxx',
+                                                      'X-RapidAPI-Host' = 'api-football-v1.p.rapidapi.com'),
+                     content_type("application/octet-stream"))
+
+    output = fromJSON(rawToChar(response$content))
+    output = output$response #Save out response
+    output = unnest(output, cols = statistics) #Unnest the statistics lists
+    data = NULL #Reset data frame
+    
+    data = output %>%
+      summarize(id = first(output$player$id),
+                name = first(output$player$name),
+                birthdate = first(output$player$birth$date),
+                height = first(output$player$height),
+                weight = first(output$player$weight),
+                season = first(output$league$season),
+                rating = mean(as.numeric(output$games$rating), na.rm = T),
+                minutes = sum(output$games$minutes, na.rm = T),
+                total_shots = sum(output$shots$total, na.rm = T),
+                target_shots = sum(output$shots$on, na.rm = T),
+                player_goals = sum(output$goals$total, na.rm = T),
+                total_passes = sum(output$passes$total, na.rm = T),
+                key_passes = sum(output$passes$key, na.rm = T),
+                accuracy_passes = sum(output$passes$accuracy, na.rm = T),
+                tackles = sum(output$tackles$total, na.rm = T),
+                total_duels = sum(output$duels$total, na.rm = T),
+                won_duels = sum(output$duels$won, na.rm = T),
+                total_dribbles = sum(output$dribbles$attempts, na.rm = T),
+                won_dribbles = sum(output$dribbles$success, na.rm = T),
+                fouls_drawn = sum(output$fouls$drawn, na.rm = T),
+                fouls_comitted = sum(output$fouls$committed, na.rm = T),
+                yellow = sum(output$cards$yellow, na.rm = T),
+                red = sum(output$cards$red, na.rm = T),
+                yellowred = sum(output$cards$yellowred, na.rm = T))
+    all_data <<- rbind(all_data, data)
+    
+    return(all_data)}
+
+
+for (i in 1:nrow(player_ids_EUR)) {
+  player_id = player_ids_EUR$Player_ID[i]
+  season = player_ids_EUR$Season[i]
+  player_data = scrape_player_stats(player_id, season)}
+```
+```{r}
+player_data_scrape = read.csv('https://raw.githubusercontent.com/lucasweyrich958/EURO2024_Simulation/main/player_stats_data.csv')
+player_id_scrape = read.csv('https://raw.githubusercontent.com/lucasweyrich958/EURO2024_Simulation/main/player_id_data.csv')
+head(player_id_scrape)
+head(player_data_scrape)
+```
+
+The code above utilizes the same logic as the scrape function for the team-level data. It uses the team IDs to scrape the roster, then utilizes that roster data to scrape the appropriate player-level data. Looking at the first rows of the player data, these are much more nuanced data-points, that will suite for evaluating a team's performance based on the player's performance throughout that whole season, not just for the specific national team games.
+
+## Data Preparation
+In the following code chunk, the data is prepared and cleaned. The player-level data is aggregated and then joined with the team-level data in order to build a data frame that includes each team for each season.
+
+```{r}
+player_id_scrape = player_id_scrape %>%
+  distinct(Player_ID, Season, .keep_all = T)
+
+#Join player data with the player IDs to later group by team IDs
+player_data_team = merge(player_data_scrape, 
+                         player_id_scrape, by.x  = c('id', 'season'), by.y = c('Player_ID', 'Season'))
+player_data_team = subset(player_data_team, select = -c(X.x, X.y)) #Remove unnecessary columns
+player_data_team$season = as.Date.character(player_data_team$season, format = '%Y') 
+player_data_team$birthdate = as.Date.character(player_data_team$birthdate, format = '%Y') #Convert columns to date
+
+#Group by team ID and calculate age in years by subtracting the season year from the birthday, dividing by 52.25 weeks.
+player_data_team_agg = player_data_team %>%
+  group_by(Team_ID) %>%
+  mutate(age = as.numeric(difftime(season, birthdate, unit="weeks"))/52.25)  
+
+player_data_team_agg$season = substr(player_data_team_agg$season, 1, 4) #Remove dd and mm from season columns that snuck in there
+#Engineer some additional features, such as duel efficiency as a ration between won duels and total duels
+player_data_team_agg = player_data_team_agg %>%
+  mutate(height = as.numeric(gsub("[^0-9.]", "", height))) %>%
+  mutate(weight = as.numeric(gsub("[^0-9.]", "", weight))) %>%
+  mutate(duel_efficiency = as.numeric(won_duels) / as.numeric(total_duels) * 100) %>%
+  mutate(dribble_efficicency = as.numeric(won_dribbles) / as.numeric(total_dribbles) * 100)
+
+#Aggregate data frame by team ID and season
+player_data_team_agg = player_data_team_agg %>%
+  group_by(Team_ID, season) %>%
+  summarise(as.numeric(mean(height, na.rm = T)),
+            as.numeric(mean(weight, na.rm = T)),
+            as.numeric(mean(rating, na.rm = T)),
+            as.numeric(mean(minutes, na.rm = T)),
+            as.numeric(mean(total_shots, na.rm = T)),
+            as.numeric(mean(player_goals, na.rm = T)),
+            as.numeric(mean(total_passes, na.rm = T)),
+            as.numeric(mean(key_passes, na.rm = T)),
+            as.numeric(mean(accuracy_passes, na.rm = T)),
+            as.numeric(mean(tackles, na.rm = T)),
+            as.numeric(mean(dribble_efficicency, na.rm = T)),
+            as.numeric(mean(duel_efficiency, na.rm = T)),
+            as.numeric(mean(fouls_drawn, na.rm = T)),
+            as.numeric(mean(fouls_comitted, na.rm = T)),
+            as.numeric(mean(yellow, na.rm = T)),
+            as.numeric(mean(red, na.rm = T)),
+            as.numeric(mean(yellowred, na.rm = T)),
+            as.numeric(mean(age, na.rm = T)))
+
+#Change column names
+colnames(player_data_team_agg) = c('Team_ID', 'Season', 'Height', 'Weight', 'Rating', 'Minutes_Played',
+                                   'Total_Shots', 'Player_Goals', 'Total_Passes', 'Key_Passes', 'Accuracy_Passes',
+                                   'Tackles', 'Dribble_Efficiency', 'Duel_Efficiency', 'Fouls_Drawn', 'Fouls_Comitted', 'Yellows',
+                                   'Reds', 'Yellowreds', 'Age')
+
+#Create hitsory data frame by joining player-level and team-level data
+hist = merge(team_data_scrape, nations, by.x = "name", by.y = "Nation", all = TRUE) #Merge Nation df with Scrape df
+hist = subset(hist, select = -c(X,played.home, played.total, wins.home, 
+                                wins.away, played.away, logo, output.form, ID, draws.total, 
+                                loses.total, home, away, home.1, away.1)) #Remove unnecessary
+colnames(hist) = c("Nation",'ID','Season', "Wins_Total", "Draws_Home", "Draws_Away", "Loses_Home",
+                       "Loses_Away", "Goals_Scored", "Goals_Conceded", 
+                       "Group", "FIFA_Rank") #Change column names
+hist = merge(hist, player_data_team_agg, by.x = c('ID', 'Season'), by.y = c('Team_ID', 'Season'))
+```
+
+Above, the history dataframe is created, which is the final dataframe to be included into the machine learning model. It includes team-level and aggregated player-level data per team, season, and tournament. 
+The machine learning model utilized in this project is a random forest regression model, due to its efficiency and transparency. The target variable to predict is total wins. 
+The data was split into a 80% training set and 20% test set. The main evaluation metric is the mean absolute error as well as R2.
+The target variable is to predict total wins for each season and tournament by the random forest.
+
+```{r}
+model_df = subset(hist, select = -c(Group, ID, Group, Nation, FIFA_Rank, Season)) #Create model df by subtracting unneeded columns
+model_df[is.na(model_df)] = 0 #Replace NaNs with 0, because in this case it is bad if a team has NaN
+set.seed(2024) #Seed for reproducibility
+
+train_ind = createDataPartition(model_df$Wins_Total, p = 0.8, list = FALSE) #Create an index for split
+train = model_df[train_ind, ] #Create training set by applying row index
+test = model_df[-train_ind, ] #Create test set by subtracting row index
+
+model = randomForest(Wins_Total ~ ., 
+                      data = train, ntree = 180, mtry = 20) #Fit a random forest model with 150 trees
+
+print(model)
+plot(model) #Plot model performance
+
+predictions = predict(model, newdata = test) #Run predictions
+
+mean_actual = mean(test$Wins_Total) 
+total_variance = sum((test$Wins_Total - mean_actual)^2)
+residual_variance = sum((test$Wins_Total - predictions)^2)
+r_squared = 1 - (residual_variance / total_variance)
+summary(test$Wins_Total) #Show summary of total wins of test set
+mae = mae(test$Wins_Total, predictions) #Show MAE
+mse = mse(test$Wins_Total, predictions) #Show MSE
+r_squared #Calculate and show R2
+
+print(paste('MAE = ', mae))
+print(paste('MSE = ', mse))
+print(paste('R2 = ', r_squared))
+
+model_test <- data.frame(Actual = test$Wins_Total, Predicted = predictions)
+ggplot(model_test, aes(x = Actual, y = Predicted)) +
+  geom_point(color = "#505D68") +
+  geom_smooth(method = "lm", se = FALSE, color = "#4793AF") +
+  labs(x = "Actual Wins", y = "Predicted Wins",
+       title = "Actual vs Predicted Wins") +
+  theme_minimal() + #Plot predictions vs actual
+  geom_text(x = 1.3, y = 9.5, label = "MAE = 0.758")
+```
+
+After a short trial-and-error hyperparameter tuning, the random forest was set to 180 trees. The final mean absolute error for the test set was 0.758, which is a good error given a range of 0 to 10 wins across team, season and tournament. Additionally, the R2 of 83% points to good predictive power of the random forest model. The scatterplot shows actual vs. predicted values, which also points to good predictive power. One of the advantages of tree-based regression is the possibility to compute SHAP-values (Shapley Additive Explanatory Values). Initially a concept of game theory, it increases the interpretability of tree-based models. Below, a SHAP-summary plot is plotted.
+
+```{r}
+shap_values = kernelshap(model, test[,-1], bg_X = test)
+sv <- shapviz(shap_values)
+sv_importance(sv, kind = "bee", max_display = 20)
+```
+
+The SHAP summary plot is an intuitive plot showing the importance of each feature, and the directionality it impacts the model. As can be seen, unexpectedly, scored goals is by far the most important feature for predicting the total wins. The coloring of each dot represents the magnitude, meaning that for scored goals, the more yellow (e.g., higher), the more wins are predicted. Other important variables include the average dribble efficiency of players during the whole season (e.g., how often does a player lose a ball), as well as the average minutes played by players during the whole season. All these variables are intuitive, as they simply point to better players. Interestingly, however, the rating variable appears to be negatively associated with total wins, which points to the importance of team chemistry. It may not simply be sufficient to have many good players. 
+While the SHAP summary plot provides good interpretability of the model, this project is about simulating the EURO 2024. Hence, next a new data frame is computed by taking the aggregate of the 2023 and 2024 season data, which serves as baseline performance for the EURO 2024.
+
+```{r}
+recent_performance = hist %>%
+  filter(Season %in% c(2023, 2024)) #Filter for 2023 and 2024 to retrieve recent performance
+
+recent_performance = recent_performance %>%
+  group_by(Nation) %>%
+  summarise(sum(Wins_Total), sum(Draws_Home), sum(Draws_Away), sum(Loses_Home), sum(Loses_Away), 
+            sum(Goals_Scored), sum(Goals_Conceded), 
+            mean(Height), mean(Weight), mean(Rating), 
+            mean(Minutes_Played), mean(Total_Shots), mean(Player_Goals), mean(Total_Passes), mean(Key_Passes),
+            mean(Accuracy_Passes), mean(Tackles), mean(Dribble_Efficiency), mean(Duel_Efficiency), 
+            mean(Fouls_Drawn),mean(Fouls_Comitted), mean(Yellows), mean(Reds), 
+            mean(Yellowreds), mean(Age)) #Calculate sum for last two seasons to get approximate performance for simulation
+
+colnames(recent_performance) = c("Nation", "Wins_Total", "Draws_Home", "Draws_Away", "Loses_Home",
+                                 "Loses_Away", "Goals_Scored", "Goals_Conceded", 'Height', 
+                                 'Weight', 'Rating', 'Minutes_Played', 'Total_Shots', 
+                                 'Player_Goals', 'Total_Passes', 'Key_Passes', 'Accuracy_Passes',
+                                 'Tackles', 'Dribble_Efficiency', 'Duel_Efficiency', 
+                                 'Fouls_Drawn', 'Fouls_Comitted', 'Yellows', 'Reds', 
+                                 'Yellowreds', 'Age') #Change column names
+recent_performance[is.na(recent_performance)] = 0
+
+recent_performance_summary = recent_performance %>%
+  rowwise() %>%
+  mutate(total_games = sum(Wins_Total, Draws_Home, Draws_Away, Loses_Home, Loses_Away)) #Aggregate the data frame to plot some distributions
+
+ggplot(data = recent_performance_summary, aes(total_games)) +
+  geom_histogram(bins = 8, fill = '#4793AF', binwidth = 0.5) +
+  labs(x = "Total Games in 2023/2024", y = "Count", 
+       title = "Distribution of Recent Games") +
+  theme_minimal()
+```
+
+The data is filtered for 2023 and 2024 and subsequently summed to gain a good baseline level of performance for each participating team. The histogram assesses the distribution of games played (sum of all wins, draws and losses), in order to assure the balance between all teams. As can be seen, it seems that all teams played between 10 and 13 games, so no team played a lot more or less games than the rest.
+With that, the tournament can be simulated
+
+## Simulation
+Two additional data frames are imported, which simply present the tournament game plan for the group phase and knock-out stage, respectively.
+
+### Group Phase
+```{r}
+group = read.csv('https://raw.githubusercontent.com/lucasweyrich958/EURO2024_Simulation/main/EURO2024_Group_State.csv')
+ko = read.csv('https://raw.githubusercontent.com/lucasweyrich958/EURO2024_Simulation/main/EURO2024_KO.csv')
+
+# Initialize a dataframe to track match outcomes
+tournament_results = data.frame(Round = integer(), Home = character(), Away = character(), 
+                                Winner = character(), stringsAsFactors = FALSE)
+
+# Initialize a dataframe to track points for each nation
+nation_points = data.frame(Nation = nations$Nation, Points = 0, Group = nations$Group)
+
+# Function to update performance metrics after each match
+update_performance = function(match_result, recent_performance) {
+  home_team = match_result$Home
+  away_team = match_result$Away
+  
+  home_index = which(recent_performance$Nation == home_team)
+  away_index = which(recent_performance$Nation == away_team)
+
+  #Update wins
+  if (!is.na(match_result$Winner)) {
+    if (match_result$Winner == home_team) {
+      recent_performance$Wins_Total[home_index] = recent_performance$Wins_Total[home_index] + 1
+    } else {
+      recent_performance$Wins_Total[away_index] = recent_performance$Wins_Total[away_index] + 1
+    }
+  }
+  
+  # Update losses
+  if (is.na(match_result$Winner)) {
+    recent_performance$Loses_Home[home_index] = recent_performance$Loses_Home[home_index] + 1
+    recent_performance$Loses_Away[away_index] = recent_performance$Loses_Away[away_index] + 1
+  } else if (match_result$Winner == home_team) {
+    recent_performance$Loses_Away[away_index] = recent_performance$Loses_Away[away_index] + 1
+  } else if (match_result$Winner == away_team) {
+    recent_performance$Loses_Home[home_index] = recent_performance$Loses_Home[home_index] + 1
+  }
+  
+  # Update draws
+  if (is.na(match_result$Winner)) {
+    recent_performance$Draws_Home[home_index] = recent_performance$Draws_Home[home_index] + 1
+    recent_performance$Draws_Away[away_index] = recent_performance$Draws_Away[away_index] + 1
+  }
+ 
+  return(recent_performance)
+}
+
+# Function to update points after each match
+update_points = function(match_result, nation_points) {
+  winner = match_result$Winner
+  if (!is.na(winner)) {
+    # Winner gets 3 points
+    nation_points[nation_points$Nation == winner, "Points"] = 
+      nation_points[nation_points$Nation == winner, "Points"] + 3
+  } else {
+    # For a tie, both teams get 1 point
+    home_team <- match_result$Home
+    away_team <- match_result$Away
+    nation_points[nation_points$Nation == home_team, "Points"] = 
+      nation_points[nation_points$Nation == home_team, "Points"] + 1
+    
+    nation_points[nation_points$Nation == away_team, "Points"] = 
+      nation_points[nation_points$Nation == away_team, "Points"] + 1
+  }
+  return(nation_points)
+}
+
+# Function to simulate a match
+simulate_match = function(match, recent_performance, model) {
+  home_team = match$Home
+  away_team = match$Away
+  
+  # Extract recent performance metrics for home and away teams
+  home_performance = recent_performance[recent_performance$Nation == home_team, ]
+  away_performance = recent_performance[recent_performance$Nation == away_team, ]
+  
+  # Extract features for the match
+  match_features = rbind(home_performance, away_performance)
+  
+  # Use random forest model to predict the outcome
+  predicted_winner = ifelse(predict(model, newdata = match_features)[1] > 
+                              predict(model, newdata = match_features)[2], home_team, away_team)
+  
+  # Update tournament results dataframe
+  match_result = data.frame(Group = match$Group, Home = match$Home, Away = match$Away, 
+                            Winner = predicted_winner)
+  tournament_results <<- rbind(tournament_results, match_result)
+  
+  # Update performance metrics
+  recent_performance = update_performance(match_result, recent_performance)
+}
+
+# Simulate group stage matches
+for (i in 1:nrow(group)) {
+  simulate_match(group[i, ], recent_performance, model)
+}
+
+# Update points after each match
+for (i in 1:nrow(tournament_results)) {
+  nation_points = update_points(tournament_results[i, ], nation_points)
+}
+
+#Initialize a data frame to rank the group phase
+ranked_nations = data.frame()
+for (group in unique(nation_points$Group)) {
+  group_nations = subset(nation_points, Group == group)
+  group_nations = group_nations[order(-group_nations$Points), ]
+  group_nations$Rank = 1:nrow(group_nations)
+  ranked_nations = rbind(ranked_nations, group_nations)}
+```
+
+After importing the tournament structure and plan, several functions are created to simulate the tournament. At first, a function to simulate a match using the random forest model as predictor. Additionally, a function is created that will update a new data frame with the group phase results per game, giving a winner 3 points, the loser 0 points, or 1 point to each team for a draw. Lastly, using the results data frame, a new data frame is created that ranks the teams by group and points. Below is a table listing the group phase results.
+
+```{r}
+ranked_nations_logo = left_join(ranked_nations, team_data_scrape %>% distinct(name, .keep_all = TRUE), 
+                                 by = c("Nation" = "name")) %>%
+  select(Nation, Points, Group, Rank, logo) #Merge the team_scrape data frame for the logos
+
+#Create a table to show the group phase results
+group_table = gt(ranked_nations_logo) %>%
+  tab_row_group(
+    label = "Group F",
+    rows = Group == "F") %>% 
+  tab_row_group(
+    label = "Group E",
+    rows = Group == "E") %>% 
+  tab_row_group(
+    label = "Group D",
+    rows = Group == "D") %>%
+  tab_row_group(
+    label = "Group C",
+    rows = Group == "C") %>%
+  tab_row_group(
+    label = "Group B",
+    rows = Group == "B") %>%
+  tab_row_group(
+    label = "Group A",
+    rows = Group == "A") %>%
+  cols_hide(c(Group, Rank)) %>%
+  gt_img_rows(columns = logo, img_source = "web", height = 15)
+group_table = tab_style(group_table, cell_fill('#bac2ca'), 
+                        cells_column_labels())
+group_table = tab_style(group_table, cell_fill('#E8EBED'), 
+                        cells_row_groups())
+group_table = tab_header(group_table, "EURO 2024 Group Phase Standings")
+group_table
+```
+
+### Knock-Out Rounds
+Using the group-phase results, the knock-out round can be simulated. Because the KO-rounds are based on the results of the group phase, and then subsequent rounds are based on the previous rounds, it is more challenging to code this efficiently. Firstly, the round of 16 is prepared using the group-stage results.
+
+```{r}
+#Create seed column that combines rank and group for KO plan
+ranked_nations$seed = paste0(ranked_nations$Rank, ranked_nations$Group, sep = "")
+ko_1 = ko[1:8, ]
+ko_2 = ko[9:nrow(ko), 1:4] #Split Round of 16 with other rounds
+
+ko_1 = ko_1 %>%
+  left_join(ranked_nations, by = c("Home" = "seed")) %>%
+  mutate(Home = Nation) #Merge Rof16 home teams based on seed
+
+ko_1 = ko_1 %>%
+  left_join(ranked_nations, by = c("Away" = "seed")) %>%
+  mutate(Away = Nation.y) #Merge Rof16 away teams based on seed
+
+ko_1 = ko_1[, 1:4]
+ko = rbind(ko_1, ko_2) 
+ko$Game = as.character(ko$Game)
+
+round16 = ko[1:8, ] #Split dataframe into each round
+quarterfinal = ko[9:12, ]
+semifinal = ko[13:14, ]
+final = ko[15, ]
+```
+
+After using the seed from the group-stage to fill the games for the round of 16, the KO-rounds will be simulated below
+
+```{r}
+ko_result = data.frame(Game = integer(), Home = character(), 
+                        Away = character(), Winner = character(), 
+                        stringsAsFactors = FALSE) #Initialize KO Result data frame
+
+
+# Adapt function to simulate a match for KO round
+simulate_ko_match = function(match, recent_performance, model) {
+  home_team = match$Home
+  away_team = match$Away
+  
+  # Extract recent performance metrics for home and away teams
+  home_performance = recent_performance[recent_performance$Nation == home_team, ]
+  away_performance = recent_performance[recent_performance$Nation == away_team, ]
+  
+  # Extract features for the match
+  match_features = rbind(home_performance, away_performance)
+  
+  # Use random forest model to predict the outcome
+  predicted_winner = ifelse(predict(model, newdata = match_features)[1] > 
+                              predict(model, newdata = match_features)[2], home_team, away_team)
+  
+  # Update tournament results dataframe
+  match_result = data.frame(Game = match$Game, Home = match$Home, Away = match$Away, Winner = predicted_winner)
+  ko_result <<- rbind(ko_result, match_result)
+}
+
+#Function to fill subsequent KO rounds based on results
+fill_ko_round = function(ko_result, next_round) {
+  next_round = next_round %>%
+    left_join(ko_result, by = c("Home" = "Game")) %>%
+    mutate(Home = Winner) %>%
+    left_join(ko_result, by = c("Away.x" = "Game")) %>%
+    mutate(Away.x = Winner.y) %>%
+    select(1:4)%>%
+    rename(Away = `Away.x`,
+           Home = `Home.x`)
+  return(next_round)
+}
+
+#Loop through each KO round fill KO result data frame
+for (i in 1:nrow(round16)) {
+  simulate_ko_match(round16[i, ], recent_performance, model)
+}
+
+quarterfinal = fill_ko_round(ko_result, quarterfinal)
+
+for (i in 1:nrow(quarterfinal)) {
+  simulate_ko_match(quarterfinal[i, ], recent_performance, model)
+}
+
+semifinal = fill_ko_round(ko_result, semifinal)
+
+for (i in 1:nrow(semifinal)) {
+  simulate_ko_match(semifinal[i, ], recent_performance, model)
+}
+
+final = fill_ko_round(ko_result, final)
+
+for (i in 1:nrow(final)) {
+  simulate_ko_match(final[i, ], recent_performance, model)
+}
+```
+
+A new data frame for the KO-round results is initialized, followed by a new function for the KO-game simulation. This had be defined anew as there are a few differences in how the results data frame is updated, while the prediciton itself stays the same. 
+Since each subsequent KO-round relies on the one before that, it was difficult to build one single loop. Hence, a function was created to fill each round's indiviual data frames with the appropraite winners from the previous rounds as participants. This was done from round of 16 all the way to the final. Below is a table with the KO-round results and the predicted EURO 2024 winner
+
+```{r}
+ko_result$Round = c('Round of 16','Round of 16','Round of 16','Round of 16','Round of 16',
+                    'Round of 16','Round of 16','Round of 16','Quarterfinal','Quarterfinal',
+                    'Quarterfinal','Quarterfinal','Semifinal','Semifinal','Final') #Add round column manually
+
+ko_result_logo = left_join(ko_result, team_data_scrape %>% distinct(name, .keep_all = TRUE), 
+                            by = c("Winner" = "name")) %>%
+  select(Game, Home, Away, Winner, Round, logo) #Merge with logo from team_scrape data frame
+
+#Create table for KO round results
+ko_table = gt(ko_result_logo) %>%
+  tab_row_group(
+    label = "Final",
+    rows = 15) %>% 
+  tab_row_group(
+    label = "Semifinals",
+    rows = 13:14) %>% 
+  tab_row_group(
+    label = "Quarterfinals",
+    rows = 9:12) %>%
+  tab_row_group(
+    label = "Round of 16",
+    rows = 1:8) %>%
+  cols_hide(c(Game, Round)) %>%
+  gt_img_rows(columns = logo, img_source = "web", height = 15)
+ko_table = tab_style(ko_table, cell_fill('#bac2ca'), 
+                        cells_column_labels())
+ko_table = tab_style(ko_table, cell_fill('#E8EBED'), 
+                        cells_row_groups())
+ko_table = tab_header(ko_table, "EURO 2024 Knock-Out Round Results")
+ko_table
+```
+
+As the table shows, the final consisted of France versus Portugal, with Portugal as the winner. Below is a print of Portugal's features of the 23/24 seasons, to understand further what made them the winner.
+
+```{r}
+portugal = recent_performance %>%
+  filter(Nation == 'Portugal')
+portugal = as.character(portugal)
+
+portugal = data.frame(names = c("Nation", "Wins_Total", "Draws_Home", "Draws_Away", "Loses_Home",
+                                 "Loses_Away", "Goals_Scored", "Goals_Conceded", 'Height', 
+                                 'Weight', 'Rating', 'Minutes_Played', 'Total_Shots', 
+                                 'Player_Goals', 'Total_Passes', 'Key_Passes', 'Accuracy_Passes',
+                                 'Tackles', 'Dribble_Efficiency', 'Duel_Efficiency', 
+                                 'Fouls_Drawn', 'Fouls_Comitted', 'Yellows', 'Reds', 
+                                 'Yellowreds', 'Age'),
+                  vars = portugal)
+
+porto_table = gt(portugal) %>%
+    cols_label(names = '', vars = '')
+
+porto_table = tab_header(porto_table, "Portugal Features 2023/2024")
+porto_table
+```
+
+The high count of scored goals, 41, appears to be a big reason of Portugal winning this EURO 2024, but other factors, such as 11 wins and only 1 loss or an average of 1583 minutes played for the 23/24 seasons by the players also likely play a role. Interestingly, the average age is 27, which suggests that experience may be more important than the generally thought-of young athletisism (although 27 is by no means old, except in sports).
+For completeness, a table with all group-phase games results is shown as well.
+
+```{r}
+group_results_table = tournament_results %>%
+  gt() %>%
+  tab_row_group(
+    label = "Group F",
+    rows = Group == "F") %>%
+  tab_row_group(
+    label = "Group E",
+    rows = Group == "E") %>%
+  tab_row_group(
+    label = "Group D",
+    rows = Group == "D") %>%
+  tab_row_group(
+    label = "Group C",
+    rows = Group == "C") %>%
+  tab_row_group(
+    label = "Group B",
+    rows = Group == "B") %>%
+  tab_row_group(
+    label = "Group A",
+    rows = Group == "A") %>%
+  cols_hide(Group)
+group_results_table = tab_style(group_results_table, cell_fill('#bac2ca'), 
+                     cells_column_labels())
+group_results_table = tab_style(group_results_table, cell_fill('#E8EBED'), 
+                     cells_row_groups())
+group_results_table = tab_header(group_results_table, "EURO 2024 Group Phase Results")
+group_results_table
+```
+
+## Model Comparison
+In order to compare the simulation with the trained random forest model, below is the same simulation performed, but with FIFA rank as explanatory variable. This means that per game, the winner will be whoever has a lower FIFA rank. Certainly, utilizing only the FIFA rank as foundation for a simulation grossly oversimplifies the complexity of soccer. The FIFA ranks were manually entered into the nations data frame, and are based on 04/27/2024 (https://inside.fifa.com/fifa-world-ranking/men). Scraping was attempted, however, the FIFA website utilizes not only HTML but Java coding, which turned out to be too complex. Keeping in mind that a scraping methodology would allow a dynamic model implementation.
+
+In order to run the simulation, the "simulate match" function has to be tweaked a bit, as well as the KO functions, to include the FIFA ranking instead of the random forest model. The same tables as shown above are included again here, to assess the results of group and KO phase.
+
+```{r}
+group = read.csv('https://raw.githubusercontent.com/lucasweyrich958/EURO2024_Simulation/main/EURO2024_Group_State.csv')
+
+tournament_results_FIFA = data.frame(Round = integer(), Home = character(), Away = character(), 
+                                Winner = character(), stringsAsFactors = FALSE)
+
+# Initialize a dataframe to track points for each nation
+nation_points_FIFA = data.frame(Nation = nations$Nation, Points = 0, Group = nations$Group)
+
+#Create function to simulate match based on FIFA rank
+simulate_match_FIFA = function(match, nations) {
+  home_team = match$Home
+  away_team = match$Away
+  
+  # Extract recent performance metrics for home and away teams
+  home_rank = nations[nations$Nation == home_team, ]
+  away_rank = nations[nations$Nation == away_team, ]
+  
+  # Use random forest model to predict the outcome
+  predicted_winner = ifelse(home_rank$FIFA_Rank < 
+                              away_rank$FIFA_Rank, home_team, away_team)
+  
+  # Update tournament results dataframe
+  match_result = data.frame(Group = match$Group, Home = match$Home, Away = match$Away, 
+                            Winner = predicted_winner)
+  tournament_results_FIFA <<- rbind(tournament_results, match_result)
+}
+
+#Simulate matches by looping through nations data frame that includes FIFA ranks
+for (i in 1:nrow(group)) {
+  simulate_match_FIFA(group[i, ], nations)
+}
+
+for (i in 1:nrow(tournament_results_FIFA)) {
+  nation_points_FIFA = update_points(tournament_results_FIFA[i, ], nation_points_FIFA)
+}
+
+#Initialize a data frame to rank the group phase
+ranked_nations_FIFA = data.frame()
+for (group in unique(nation_points_FIFA$Group)) {
+  group_nations_FIFA = subset(nation_points_FIFA, Group == group)
+  group_nations_FIFA = group_nations_FIFA[order(-group_nations_FIFA$Points), ]
+  group_nations_FIFA$Rank = 1:nrow(group_nations_FIFA)
+  ranked_nations_FIFA = rbind(ranked_nations_FIFA, group_nations_FIFA)}
+
+ranked_nations_logo_FIFA = left_join(ranked_nations_FIFA, team_data_scrape %>% distinct(name, .keep_all = TRUE), 
+                                by = c("Nation" = "name")) %>%
+  select(Nation, Points, Group, Rank, logo) #Merge the team_scrape data frame for the logos
+
+#Create a table to show the group phase results
+group_table_FIFA = gt(ranked_nations_logo_FIFA) %>%
+  tab_row_group(
+    label = "Group F",
+    rows = Group == "F") %>% 
+  tab_row_group(
+    label = "Group E",
+    rows = Group == "E") %>% 
+  tab_row_group(
+    label = "Group D",
+    rows = Group == "D") %>%
+  tab_row_group(
+    label = "Group C",
+    rows = Group == "C") %>%
+  tab_row_group(
+    label = "Group B",
+    rows = Group == "B") %>%
+  tab_row_group(
+    label = "Group A",
+    rows = Group == "A") %>%
+  cols_hide(c(Group, Rank)) %>%
+  gt_img_rows(columns = logo, img_source = "web", height = 15)
+group_table_FIFA = tab_style(group_table_FIFA, cell_fill('#bac2ca'), 
+                        cells_column_labels())
+group_table_FIFA = tab_style(group_table_FIFA, cell_fill('#E8EBED'), 
+                        cells_row_groups())
+group_table_FIFA = tab_header(group_table, "EURO 2024 Group Phase Standings - FIFA Ranking")
+group_table_FIFA
+
+#Create seed column that combines rank and group for KO plan
+ko_FIFA = read.csv('https://raw.githubusercontent.com/lucasweyrich958/EURO2024_Simulation/main/EURO2024_KO.csv')
+
+ranked_nations_FIFA$seed = paste0(ranked_nations_FIFA$Rank, ranked_nations_FIFA$Group, sep = "")
+ko_1_FIFA = ko_FIFA[1:8, ]
+ko_2_FIFA = ko_FIFA[9:nrow(ko_FIFA), 1:4] #Split Round of 16 with other rounds
+
+ko_1_FIFA = ko_1_FIFA %>%
+  left_join(ranked_nations_FIFA, by = c("Home" = "seed")) %>%
+  mutate(Home = Nation) #Merge Rof16 home teams based on seed
+
+ko_1_FIFA = ko_1_FIFA %>%
+  left_join(ranked_nations_FIFA, by = c("Away" = "seed")) %>%
+  mutate(Away = Nation.y) #Merge Rof16 away teams based on seed
+
+ko_1_FIFA = ko_1_FIFA[, 1:4]
+ko_FIFA = rbind(ko_1_FIFA, ko_2_FIFA) 
+ko_FIFA$Game = as.character(ko_FIFA$Game)
+
+round16_FIFA = ko_FIFA[1:8, ] #Split dataframe into each round
+quarterfinal_FIFA = ko_FIFA[9:12, ]
+semifinal_FIFA = ko_FIFA[13:14, ]
+final_FIFA = ko_FIFA[15, ]
+
+ko_result_FIFA = data.frame(Game = integer(), Home = character(), 
+                       Away = character(), Winner = character(), 
+                       stringsAsFactors = FALSE) #Initialize KO Result data frame
+
+simulate_ko_match = function(match, nation) {
+  home_team = match$Home
+  away_team = match$Away
+  
+  home_rank = nations[nations$Nation == home_team, ]
+  away_rank = nations[nations$Nation == away_team, ]
+  
+  # Use random forest model to predict the outcome
+  predicted_winner = ifelse(home_rank$FIFA_Rank < 
+                              away_rank$FIFA_Rank, home_team, away_team)
+  
+  # Update tournament results dataframe
+  match_result = data.frame(Game = match$Game, Home = match$Home, Away = match$Away, Winner = predicted_winner)
+  ko_result_FIFA <<- rbind(ko_result_FIFA, match_result)
+}
+
+#Loop through each KO round fill KO result data frame
+for (i in 1:nrow(round16_FIFA)) {
+  simulate_ko_match(round16_FIFA[i, ], nations)
+}
+
+quarterfinal_FIFA = fill_ko_round(ko_result_FIFA, quarterfinal_FIFA)
+
+for (i in 1:nrow(quarterfinal_FIFA)) {
+  simulate_ko_match(quarterfinal_FIFA[i, ], nations)
+}
+
+semifinal_FIFA = fill_ko_round(ko_result_FIFA, semifinal_FIFA)
+
+for (i in 1:nrow(semifinal_FIFA)) {
+  simulate_ko_match(semifinal_FIFA[i, ], nations)
+}
+
+final_FIFA = fill_ko_round(ko_result_FIFA, final_FIFA)
+
+for (i in 1:nrow(final_FIFA)) {
+  simulate_ko_match(final_FIFA[i, ], nations)
+}
+
+ko_result_FIFA$Round = c('Round of 16','Round of 16','Round of 16','Round of 16','Round of 16',
+                    'Round of 16','Round of 16','Round of 16','Quarterfinal','Quarterfinal',
+                    'Quarterfinal','Quarterfinal','Semifinal','Semifinal','Final') #Add round column manually
+
+ko_result_logo_FIFA = left_join(ko_result_FIFA, team_data_scrape %>% distinct(name, .keep_all = TRUE), 
+                           by = c("Winner" = "name")) %>%
+  select(Game, Home, Away, Winner, Round, logo) #Merge with logo from team_scrape data frame
+
+#Create table for KO round results
+ko_table_FIFA = gt(ko_result_logo_FIFA) %>%
+  tab_row_group(
+    label = "Final",
+    rows = 15) %>% 
+  tab_row_group(
+    label = "Semifinals",
+    rows = 13:14) %>% 
+  tab_row_group(
+    label = "Quarterfinals",
+    rows = 9:12) %>%
+  tab_row_group(
+    label = "Round of 16",
+    rows = 1:8) %>%
+  cols_hide(c(Game, Round)) %>%
+  gt_img_rows(columns = logo, img_source = "web", height = 15)
+ko_table_FIFA = tab_style(ko_table_FIFA, cell_fill('#bac2ca'), 
+                     cells_column_labels())
+ko_table_FIFA = tab_style(ko_table_FIFA, cell_fill('#E8EBED'), 
+                     cells_row_groups())
+ko_table_FIFA = tab_header(ko_table_FIFA, "EURO 2024 Knock-Out Round Results - FIFA Ranking")
+ko_table_FIFA
+```
+
+Using only the FIFA rank, the predicted winner is France. This is unsurprising, since France is ranked 2nd at the moment, making it highest ranked EURO 2024 participant. While the KO-round looks differently compared to the simulation above, the group phase seems to look similar. 
+
+## Conclusion
+This project aimed to simulate the UEFA European Championship 2024 and predict the winner using a random forest regression model, trained with historical team- and player-level data. The data was scraped from the Football API, using functions systematically. First, team-level data scraped, followed by player IDs based on the team rosters for each season, followed by player-level data for the respective seasons. 
+
+The simulation predicted France vs. Portugal to play in the final, where Portugal wins, therefore being the 2024 European champion. 
+
+Additionally, SHAP values were computed for the random forest model to evaluate the impact of each feature, which showed interesting things, such that high values of fouls committed predicting more wins. This may suggest that a more aggressive and physical strategy is more successful than passive. Although not without the risk of receiving yellow or even red cards, then potentially receiving a suspension. 
+
+To validate the model further, a separate simulation was run using FIFA rank as predictor, which showed similar results in the group phase but different outcomes in the KO phase.
+
+Lastly, a few limitations of this model. The target variable of total wins was selected. This is an oversimplification of a soccer game, as the outcome is decided by whoever has more goals scored. The SHAP values showed that. Given the amount of data available for national teams, who on average play 8 - 11 games per year, the random forest model did not predict goals scored well. Using more data by players, possibly, would allow to predict that better. Additionally, it was not possible to keep the API alive due to costs, not allowing the model to be continuously updated.
+
+In sum, this project simulated the EURO 2024, predicting Portugal as a winner. Now it's time to set a bet for Portugal to win and enjoy watching the EURO 2024. Even though my personal favorite is Germany this year.
