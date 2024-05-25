@@ -491,7 +491,7 @@ wins for each season and tournament by the random forest.
 
     plot(model) #Plot model performance
 
-![](EURO-2024-Simulation_files/figure-markdown_strict/unnamed-chunk-7-1.png)
+![](https://github.com/lucasweyrich958/EURO2024_Simulation/blob/main/figures/Rplot.png)
 
     predictions = predict(model, newdata = test) #Run predictions
 
@@ -533,7 +533,7 @@ wins for each season and tournament by the random forest.
 
     ## `geom_smooth()` using formula = 'y ~ x'
 
-![](EURO-2024-Simulation_files/figure-markdown_strict/unnamed-chunk-7-2.png)
+![](https://github.com/lucasweyrich958/EURO2024_Simulation/blob/main/figures/Rplot01.png)
 
 After a short trial-and-error hyperparameter tuning, the random forest
 was set to 180 trees. The final mean absolute error for the test set was
@@ -555,7 +555,7 @@ models. Below, a SHAP-summary plot is plotted.
     sv <- shapviz(shap_values)
     sv_importance(sv, kind = "bee", max_display = 20)
 
-![](EURO-2024-Simulation_files/figure-markdown_strict/unnamed-chunk-8-1.png)
+![](https://github.com/lucasweyrich958/EURO2024_Simulation/blob/main/figures/Rplot02.png)
 
 The SHAP summary plot is an intuitive plot showing the importance of
 each feature, and the directionality it impacts the model. As can be
@@ -607,7 +607,7 @@ baseline performance for the EURO 2024.
            title = "Distribution of Recent Games") +
       theme_minimal()
 
-![](EURO-2024-Simulation_files/figure-markdown_strict/unnamed-chunk-9-1.png)
+![](https://github.com/lucasweyrich958/EURO2024_Simulation/blob/main/figures/Rplot03.png)
 
 The data is filtered for 2023 and 2024 and subsequently summed to gain a
 good baseline level of performance for each participating team. The
@@ -3148,6 +3148,8 @@ results is shown as well.
   
 </table>
 </div>
+
+![](https://github.com/lucasweyrich958/EURO2024_Simulation/blob/main/figures/Rplot05.png)
 
 ## Model Comparison
 
